@@ -1,0 +1,994 @@
+---
+title: "TFM"
+author: "AMM"
+date: '2022-10-23'
+output: word_document
+always_allow_html: true
+---
+
+Master Thesis: "Patterns of neoantigenic burden on metastatic locations".
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=FALSE, warning=FALSE)
+```
+
+First of all, the required packages are installed, and working directory is established.
+
+```{r packages, include=FALSE}
+#intall required packages
+library(knitr)
+library(gridExtra)
+library(kableExtra)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(readxl)
+library(writexl)
+library(seqinr)
+library(bigreadr)
+library(stringr)
+library(plyr)
+library(tidyr)
+library(g3viz)
+library(protr)
+library(dunn.test)
+library(sjmisc)
+library(finalfit)
+library(survminer)
+library(survival)
+library(summarytools)
+library(arsenal)
+library(forcats) 
+
+#install packages from bioconductor
+library(Biobase)
+if (!(require("cBioPortalData"))) BiocManager::install(c("cBioPortalData"))
+library(cBioPortalData)
+```
+
+
+```{r workdir}
+#set working directory
+setwd("C:/Users/andri/MBB_UOC/TFM/Scripts")
+```
+
+## DATA IMPORT
+
+This work is based on the use of public  data, from the study "msk_met_2021", that can be downloaded from cBioPortal.
+
+### CLINICAL DATA IMPORT
+
+Clinical data of the patient cohort is downloaded from cBioPortal as follows: 
+```{r dataimport}
+#obtain dataset from cbioportal
+cbio<- cBioPortal()
+getStudies(api=cbio)
+#import clinical data
+msk_met_clin <- clinicalData(api=cbio, studyId = "msk_met_2021")
+#take a look at the data
+head(msk_met_clin)
+
+#codify variables according to their characteristics
+msk_met_clin[2:6] <- sapply(msk_met_clin[2:6],as.numeric)
+msk_met_clin$OS_STATUS<-as.factor(msk_met_clin$OS_STATUS)
+msk_met_clin$RACE<-as.factor(msk_met_clin$RACE)
+msk_met_clin$SAMPLE_COUNT<-as.integer(msk_met_clin$SAMPLE_COUNT)
+msk_met_clin$SEX<-as.factor(msk_met_clin$SEX)
+msk_met_clin$AGE_AT_LAST_CONTACT<-as.numeric(msk_met_clin$AGE_AT_LAST_CONTACT)
+msk_met_clin$CANCER_TYPE<-as.factor(msk_met_clin$CANCER_TYPE)
+msk_met_clin[,15:35] <- lapply(msk_met_clin[,15:35],as.factor)
+msk_met_clin[36:37] <- sapply(msk_met_clin[36:37],as.numeric)
+msk_met_clin$GENE_PANEL<-as.factor(msk_met_clin$GENE_PANEL)
+msk_met_clin$IS_DIST_MET_MAPPED<-as.logical(msk_met_clin$IS_DIST_MET_MAPPED)
+msk_met_clin[40:42] <- sapply(msk_met_clin[40:42],as.numeric)
+msk_met_clin$MSI_TYPE<-as.factor(msk_met_clin$MSI_TYPE)
+msk_met_clin$MUTATION_COUNT<-as.numeric(msk_met_clin$MUTATION_COUNT)
+msk_met_clin[,45:47] <- lapply(msk_met_clin[,45:47],as.factor)
+msk_met_clin$SAMPLE_COVERAGE<-as.numeric(msk_met_clin$SAMPLE_COVERAGE)
+msk_met_clin[,49:51] <- lapply(msk_met_clin[,49:51],as.factor)
+msk_met_clin[52:53] <- sapply(msk_met_clin[52:53],as.numeric)
+msk_met_clin$METASTATIC_SITE<-as.factor(msk_met_clin$METASTATIC_SITE)
+#check characteristics of variables
+View(msk_met_clin)
+#check the number of patients of this study
+dim(msk_met_clin)
+
+#obtain a summary of the variables
+sum_clin <- data.frame(summary(msk_met_clin))
+write_xlsx(sum_clin, "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/sum_clin.xlsx")
+```
+
+### MUTATIONAL DATA IMPORT
+
+Afterwards, mutational data is downloaded from the cBioPortal website and imported to R from the txt file, given the big file size.
+
+```{r data_mut}
+#import mutational data
+data_mut <- fread2("C:/Users/andri/MBB_UOC/TFM/Scripts/data_mutations.txt")
+head(data_mut)
+#codify variables according to their characteristics
+data_mut[10:13] <- lapply(data_mut[10:13],as.factor)
+data_mut[27:28] <- lapply(data_mut[27:28],as.factor)
+#check the number of mutations and the number of patients
+dim(data_mut)
+length(unique(data_mut$Tumor_Sample_Barcode))
+
+#obtain a summary of the variables
+sum_mut <- data.frame(summary(data_mut))
+write_xlsx(sum_mut, "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/sum_mut.xlsx")
+```
+
+
+### PATIENT COHORT SELECTION 
+
+Before selecting the patients that will be analyzed in this study, we check whether there is more than one sample per patient, to see if we could compare the neoantigen burden between samples of the primary tumor or metastasis of the same patient.
+
+```{r samplespatient}
+#check whether there is more than one sample per patient
+summary(msk_met_clin$SAMPLE_COUNT)
+```
+
+Since there is only one sample per patient, no comparison between primary tumor and metastases can be performed intrapatient, which will be a limitation of the study. 
+
+To prepare the patient cohort of the current project, we select patients with the tumor types and metastatic locations that will be included in this study.
+
+```{r ptcohort}
+#selection of the patient cohort
+#since patients have been sequenced with different gene panels, only patients sequenced with the bigger panel (IMPACT468) are selected:
+summary(msk_met_clin$GENE_PANEL)
+patients <- subset(msk_met_clin, GENE_PANEL=="IMPACT468")
+#check the number of patients
+dim(patients)
+
+#select only metastatic patients
+patients <- subset(patients, MET_COUNT > 1)
+#select only patients with diagnosed metastasis on the locations of interest
+patients <- subset(patients, DMETS_DX_BONE=="Yes" | DMETS_DX_CNS_BRAIN=="Yes" | DMETS_DX_LIVER=="Yes" | DMETS_DX_LUNG=="Yes")
+dim(patients)
+#check that we still have patients whose samples are from the primary tumor, not only metastases
+summary(patients$SAMPLE_TYPE)
+
+#check the available cancer types
+summary(patients$CANCER_TYPE)
+#select the primary tumours of interest
+patients <- subset(patients, CANCER_TYPE=="Breast Cancer" | CANCER_TYPE=="Colorectal Cancer" | CANCER_TYPE=="Renal Cell Carcinoma" | CANCER_TYPE=="Non-Small Cell Lung Cancer" | CANCER_TYPE=="Prostate Cancer" | CANCER_TYPE=="Melanoma")
+#remove unused levels of that variable
+patients$CANCER_TYPE <- droplevels(patients$CANCER_TYPE)
+#check the number of patients
+dim(patients)
+#check the number of patients of each type of cancer
+summary(patients$CANCER_TYPE)
+
+#To obtain an equal representation of each tumor type, we select 98 patients of each type of cancer for our patient cohort (there are only 98 cases of renal cell carcinoma)
+set.seed(12345)
+pt_cohort <- ddply(patients,.(CANCER_TYPE),function(x) x[sample(nrow(x),98),])
+#check
+summary(pt_cohort$CANCER_TYPE)
+```
+
+Now we select a discovery patient cohort, which will be composed of 200 patients:
+```{r discov_ptcohort}
+#To obtain a discovery patient cohort, we select samples from the metastatic locations of interest
+#To select an equally distributed number of metastatic locations, we check the number of samples of each metastatic site
+summary(pt_cohort$METASTATIC_SITE)
+#since there are only 27 samples of brain metastasis, we select 25 of each location:
+discov_met <- subset(pt_cohort, METASTATIC_SITE=="Bone" | METASTATIC_SITE=="CNS/Brain" | METASTATIC_SITE=="Liver" | METASTATIC_SITE=="Lung" | METASTATIC_SITE=="")
+#drop unused levels
+discov_met$METASTATIC_SITE <- droplevels(discov_met$METASTATIC_SITE)
+#obtain 25 patients from each metastatic location
+discov_met <- ddply(discov_met,.(METASTATIC_SITE),function(x) x[sample(nrow(x),25),])
+#check that the samples have been selected accordingly
+dim(discov_met) #nr of patients
+summary(discov_met$SAMPLE_TYPE) #all samples from metastasis
+summary(discov_met$METASTATIC_SITE) #metastatic locations of interest
+
+#since there are 100 samples from metastases, we select 100 samples from primary tumors of the discovery patient cohort
+discov_pri <- as.data.frame(subset(pt_cohort,SAMPLE_TYPE=="Primary"))
+discov_pri <- discov_pri[sample(1:nrow(discov_pri), 100), ]
+dim(discov_pri) #nr of patients
+summary(discov_pri$CANCER_TYPE) #all samples from primary tumor
+
+#join the 200 patients that will compose our discovery patient cohort
+discov_pts<-bind_rows(discov_met,discov_pri)
+
+#add a numeric identifier to each patient, since the original code is too long for the neoantigen prediction tool
+discov_pts$PtNr <- seq.int(nrow(discov_pts))
+#view our discovery patient cohort
+View(discov_pts)
+#save our discovery patient cohort in an excel data file
+write_xlsx(discov_pts, "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/discov_pts.xlsx")
+```
+
+# RESULTS
+
+## PATIENT COHORT DESCRIPTION
+
+```{r ptdesc}
+#obtain a summary of our patient cohort and save it as an excel file
+sum_discov_pts <- data.frame(summary(discov_pts))
+write_xlsx(sum_discov_pts, "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/sum_discov_pts.xlsx")
+#print a summary of some clinicopathological variables
+clin_var<-c("AGE_AT_SEQUENCING","OS_STATUS","SEX","CANCER_TYPE","SAMPLE_TYPE","METASTATIC_SITE","MET_COUNT", "DMETS_DX_BONE", "DMETS_DX_CNS_BRAIN", "DMETS_DX_LIVER", "DMETS_DX_LUNG")
+#remove unused levels of metastatic sites
+discov_pts$METASTATIC_SITE <- droplevels(discov_pts$METASTATIC_SITE)
+#obtain a summary of the most important variables of the discovery cohort
+sumclinicopat<-summary(discov_pts %>% select(clin_var))
+```
+
+```{r dfsumclinicopat, include=TRUE, warning=FALSE,results="asis"}
+#create a table with the summary of the clinicopathological variables
+dfclinicopat<- discov_pts %>% select(clin_var)
+#generates an html file with the table
+view(dfSummary(dfclinicopat)) 
+dfSummary(dfclinicopat,plain.ascii=FALSE,style="grid",graph.magnif=0.75,valid.col=FALSE,tmp.img.dir="/tmp")
+```
+
+As we can see, the number of patients of each sex, cancer type and metastasis is more or less balanced.
+
+We next addressed the frequency of the different types of primary cancer in each metastatic location:
+
+```{r, fig.show="hold",out.width=100, fig.align="default", fig.cap="Figure. 2. Frequency of primary cancer type in each metastatic location."}
+options(repr.plot.width=15, repr.plot.height=5)
+p <- ggplot(data=subset(discov_pts, !is.na(METASTATIC_SITE)), aes(x="", stat="bin", fill=CANCER_TYPE)) + geom_bar(position="fill")  + ggtitle("Distribution of primary cancer types in each metastatic site") + labs(fill="Cancer Type") + xlab("") + ylab("")  + facet_grid(facets=. ~ METASTATIC_SITE) + coord_polar(theta="y") + scale_fill_brewer(palette="Set2") + theme_void() + theme(plot.title = element_text(hjust = 0.5, vjust=2, size=11)) + theme(legend.key.size = unit(0.2, 'cm'), legend.title = element_text(size=9), legend.text = element_text(size=8)) 
+p
+```
+
+## IDENTIFICATION OF POTENTIAL NEOANTIGENS
+
+### PEPTIDE GENERATION
+
+First, a dataframe containing only the mutations of the patients included in the discovery patient cohort is created.
+
+```{r muta_discov_pts}
+#the sample identification is called "Tumor_Sample_Barcode" in file data_mut (mutation data) and "sampleId" in file discov_pts (clinical data from patients of the discovery patient cohort)
+#name of gene is located in variable "Hugo_Symbol"
+#change at protein level in variable "HGVSp_Short"
+
+#number of mutations
+dim(data_mut)
+#join the mutations of the discovery patient cohort with their clinical data:
+#change the name of the variable of sample identification
+data_mut$sampleId<-data_mut$Tumor_Sample_Barcode
+#join clinical and mutational data by sample Id
+mut_discov_pts <- merge(discov_pts, data_mut, by = 'sampleId')
+#Number of mutations in joint file
+dim(mut_discov_pts)
+#check the number of patients in joint file
+length(unique(mut_discov_pts$sampleId))
+#number of patients in file of mutations
+length(unique(data_mut$sampleId))
+```
+
+Afterwards, mutations are filtered, to select only missense SNVs, which will be used to generate mutant peptides and predict neoantigens. 
+
+```{r mutations}
+#types of mutations
+summary(mut_discov_pts$Variant_Classification)
+#due to technical difficulties of peptide generation, only missense mutations will be considered in this study
+mis_mut_discov_pts <- subset(mut_discov_pts, Variant_Classification=="Missense_Mutation")
+#remove unused levels of that variable
+mis_mut_discov_pts$Variant_Classification <- droplevels(mis_mut_discov_pts$Variant_Classification)
+dim(mis_mut_discov_pts)
+#Among missense mutations, only SNVs will be selected (of note, in the database they are called SNP, not SNV):
+mutSNV_discov_pts <- subset(mis_mut_discov_pts, Variant_Type=="SNP")
+#remove unused levels of that variable
+mutSNV_discov_pts$Variant_Type <- droplevels(mutSNV_discov_pts$Variant_Type)
+dim(mutSNV_discov_pts)
+```
+
+Representation of the types of mutations
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 3. Types of mutations."}
+#obtain percentages of each type of mutations
+mut_discov_pts$Variant_Classification<-droplevels(mut_discov_pts$Variant_Classification)
+perc_mut<-data.frame(prop.table(table(mut_discov_pts$Variant_Classification)))
+#represent on pie chart
+options(repr.plot.width =9, repr.plot.height =9)
+labels<-paste0(round(100*prop.table(table(mut_discov_pts$Variant_Classification)),2),"%")
+pie_mut_type<-ggplot(perc_mut, aes(x = "", y=Freq, fill = Var1)) + coord_polar(theta="y") + theme_void() + 
+  geom_col()+
+  scale_fill_brewer(palette="Paired")+
+  geom_label_repel(aes(label=labels),show.legend=FALSE)+
+  theme(plot.title = element_text(hjust = 0.5))+
+  labs( 
+    title = "Frequency of mutations",
+    x = "", 
+    y = ""
+  )+
+  guides(fill = guide_legend(title = "Mutation type"))
+```
+
+From these, mutant peptides are generated:
+
+```{r peptides}
+#list for mutated peptides
+mut_seqs_FASTA<-list()
+#list for mutations occuring in the first positions and cannot be used to create peptides
+shorts<-list()
+#list for mutations that cannot be replaced to create peptides
+errors<-list() 
+#loop to analyze each mutation of the patient
+  for (fila in 1:nrow(mutSNV_discov_pts)) {
+    #obtain code uniprot from hugo symbol
+    gen_conv<-hgnc2uniprot(mutSNV_discov_pts$Hugo_Symbol[fila])
+    if (length(gen_conv$uniprot > 0)) {
+      mutSNV_discov_pts$cod_uniprot[fila]<-gen_conv$uniprot
+  } 
+    #obtain the sequence from uniprot
+    secuencia<-getUniProt(mutSNV_discov_pts$cod_uniprot[fila])
+    # Give the FASTA structure, including patient number, gene name and mutation
+    mut<-str_replace(mutSNV_discov_pts$HGVSp_Short[fila],"p.", "")
+    names(secuencia) <- c(paste(">",mutSNV_discov_pts$Hugo_Symbol[fila],mut, mutSNV_discov_pts$PtNr[fila]))
+    #codify the mutation
+    pos<-as.numeric(str_extract(mut,"[0-9]+"))
+    baseref<-str_sub(mut, 1, 1) 
+    basemut<-str_sub(mut, - 1, - 1) 
+    #change the mutant base in the sequence
+    for (i in 1:str_length(secuencia)) {
+      if (i!=pos){
+        } else if ((str_sub(secuencia, start = i, end = i))==baseref){
+          str_sub(secuencia, start = pos, end = pos, omit_na = FALSE) <- basemut
+            if (pos>8){
+              #obtain the mutated peptide
+              mut_pep <- str_sub(secuencia, start = pos-8, end = pos+8)
+              #create a fasta with the mutated peptide
+              mut_seq_FASTA<-mut_pep
+              names(mut_seq_FASTA) <-   c(paste(mutSNV_discov_pts$PtNr[fila],mutSNV_discov_pts$Hugo_Symbol[fila],mut))
+              mut_seqs_FASTA<-append(mut_seqs_FASTA,mut_seq_FASTA)
+            }
+          else {
+            short<-c(paste(mutSNV_discov_pts$PtNr[fila],mutSNV_discov_pts$Hugo_Symbol[fila],mut))
+            shorts<-append(shorts,short)
+    }
+  }
+      else {
+      error<-c(paste(mutSNV_discov_pts$PtNr[fila],mutSNV_discov_pts$Hugo_Symbol[fila],mut))
+      errors<-append(errors,error)
+    }
+  }
+}
+
+
+#check how many mutations occurred in the first amino acids and could not be used to create peptides of 17 amino acids
+str(shorts)
+#check how many peptides could not be created for other reasons
+str(errors)
+#check how many mutated peptides have been obtained
+length(mut_seqs_FASTA)
+#create a FASTA containing the mutated peptides
+write.fasta(mut_seqs_FASTA,names(mut_seqs_FASTA), "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/mut_seqs_FASTA.fa")
+#since it is too big as an input for NetMHCcons software, this FASTA file is divided in three files:
+#create a FASTA containing the mutated peptides has been created accordingly
+write.fasta(mut_seqs_FASTA[1:499],names(mut_seqs_FASTA[1:499]), "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/mut_seqs_FASTA1.fa")
+#create a FASTA containing the mutated peptides has been created accordingly
+write.fasta(mut_seqs_FASTA[500:999],names(mut_seqs_FASTA[500:999]), "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/mut_seqs_FASTA2.fa")
+#create a FASTA containing the mutated peptides has been created accordingly
+write.fasta(mut_seqs_FASTA[1000:length(mut_seqs_FASTA)],names(mut_seqs_FASTA[1000:length(mut_seqs_FASTA)]), "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/mut_seqs_FASTA3.fa")
+```
+
+```{r importoutput}
+#import the output files from netMHCons
+folderpath <- "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/"
+namepattern <- "NetMHCcons*.xls"
+filesoutput <- list.files(folderpath, pattern = namepattern, full.names = TRUE)
+outputdata <- list()
+# read files
+for (i in 1:length(filesoutput)) {
+  outputdata[[i]] <- read.csv(filesoutput[i], header = TRUE, stringsAsFactors = FALSE, sep = "\t", skip = 1)
+}
+#join the three outputs
+output_NetMHCcons <- do.call(rbind, outputdata)
+dim(output_NetMHCcons)
+
+#obtain the column containing the HLAs from one of the files
+HLAs <- read.csv("C:/Users/andri/MBB_UOC/TFM/Scripts/Results/NetMHCcons_1.xls", header=FALSE, stringsAsFactors=FALSE, sep="\t",nrows = 1)
+head(HLAs)
+#remove lines with NA
+HLAsupertypes<-as.character(HLAs[ , colSums(is.na(HLAs))==0])
+str(HLAsupertypes)
+
+#add each HLA type to the name of the associated columns
+colnames(output_NetMHCcons)[4:6] = paste(colnames(output_NetMHCcons)[4:6],HLAsupertypes[1],sep="_")
+colnames(output_NetMHCcons) = gsub("\\.1$", HLAsupertypes[2], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.2$", HLAsupertypes[3], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.3$", HLAsupertypes[4], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.4$", HLAsupertypes[5], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.5$", HLAsupertypes[6], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.6$", HLAsupertypes[7], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.7$", HLAsupertypes[8], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.8$", HLAsupertypes[9], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.9$", HLAsupertypes[10], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.10$", HLAsupertypes[11], colnames(output_NetMHCcons))
+colnames(output_NetMHCcons) = gsub("\\.11$", HLAsupertypes[12], colnames(output_NetMHCcons))
+
+#recode numeric variables
+output_NetMHCcons[4:41] <- sapply(output_NetMHCcons[4:41],as.numeric)
+
+View(output_NetMHCcons)
+#export to excel file
+write_xlsx(output_NetMHCcons, "C:/Users/andri/MBB_UOC/TFM/Scripts/Results/output_netMHCcons_joint.xlsx")
+```
+
+```{r output, include=TRUE}
+#create a table with the summary of the clinicopathological variables
+#check
+t5<-head(output_NetMHCcons)
+opts <- options(knitr.kable.NA = "")
+knitr::kable(t5, booktabs = TRUE, 
+             caption = "Table 3. Output of NetMHCcons (first lines)") %>% 
+  kable_styling(latex_options = "HOLD_position")
+```
+
+
+```{r neoantigens}
+#classify peptides as binders (which will be considered neoantigens) or not
+output_NetMHCcons$Binder <- dplyr::recode(output_NetMHCcons$NB, "0" = "No", .default = "Yes")
+
+#create a column with the information of each mutation and the number of the patient by splitting the column ID of the output from NetMHCcons
+output_NetMHCcons <- output_NetMHCcons %>%
+  separate(ID, c("PtNr", "Gene", "Mutation"), "_")
+head(output_NetMHCcons)
+
+#select only those peptides that could bind and be classified as neoantigens
+binding_pep <- subset(output_NetMHCcons, NB>0)
+#check the number of peptides produced by NetMHCCons
+dim(output_NetMHCcons)
+#check the number of binding peptides
+dim(binding_pep)
+```
+
+1838 mutated peptides have been classified as binders and can be considered neoantigens. 
+
+```{r, fig.show="hold",out.width="80%", fig.align="default", fig.cap="Figure. 4. Number of binding peptides and number of binders."}
+#check how many peptides are predicted to bind to at least one HLA supertype
+perc_binders<-data.frame(prop.table(table(output_NetMHCcons$Binder)))
+#check number of binders of each peptide
+perc_num_binders<-data.frame(prop.table(table(output_NetMHCcons$NB)))
+
+#represent on pie charts
+options(repr.plot.width =9, repr.plot.height =9)
+#graph 1
+labels1<-paste0(round(100*prop.table(table(output_NetMHCcons$Binder)),2),"%")
+pie_binders<-ggplot(perc_binders, aes(x = "", y=Freq, fill = Var1)) + coord_polar(theta="y") + theme_void() + 
+  geom_col()+
+  geom_label(aes(label=labels1), position = position_stack(vjust=0.5),show.legend=FALSE)+
+  scale_fill_brewer(palette="Set2")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  labs( 
+    title = "Binding peptides", tag = "A)",
+    x = "", 
+    y = ""
+  )+
+  guides(fill = guide_legend(title = "Binders"))
+
+options(repr.plot.width =9, repr.plot.height =9)
+#graph 2
+#check number of binders of each peptide
+labels2<-paste0(round(100*prop.table(table(output_NetMHCcons$NB)),2),"%")
+pie_nrbinders<-ggplot(perc_num_binders, aes(x = "", y=Freq, fill = Var1)) + coord_polar(theta="y") + theme_void() + 
+  geom_col()+
+  geom_label_repel(aes(label=labels2),nudge_x=0.6,show.legend=FALSE)+
+  scale_fill_brewer(palette="Set2")+
+  theme(plot.title = element_text(hjust = 0.5))+
+  labs( 
+    title = "Number of binders", tag = "B)",
+    x = "", 
+    y = ""
+  )+
+  guides(fill = guide_legend(title = "Binders"))
+
+pie_bindingpep <- grid.arrange(pie_binders, pie_nrbinders, ncol=2)
+ggsave(pie_bindingpep, file = "Results/pie_bindingpep.png")
+```
+
+```{r results_neopts}
+#combine database of neoantigens and the discov_pts
+neo_discov_pts<-merge(discov_pts, output_NetMHCcons, by="PtNr",all=TRUE)
+dim(neo_discov_pts)
+View(neo_discov_pts)
+```
+
+```{r results_HLA}
+affinities<-select(output_NetMHCcons,contains("nM"))
+
+#dichotomize variables  to identify the number of binding peptides of each HLA supertype
+HLA_binders <- affinities %>%  dicho(dich.by = 500, val.labels = c("Non-binder", "Binder"))
+#dichotomize variables to identify the number of strong binders of each HLA supertype
+HLA_strong <- affinities %>%  dicho(dich.by = 50, val.labels = c("Non-binder", "Strong binder"))
+```
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 5. Affinity of mutant peptides according to HLA supertypes."}
+boxplot(affinities, names=HLAsupertypes, cex.axis=0.6, las=2, xlab="", ylab="Affinities (nM)")
+mtext("HLA supertypes", side=1, line=4)
+abline(h = 50, col="green")
+abline(h = 500, col="blue")
+```
+
+```{r sumHLA, include=TRUE, results="asis"}
+#obtain summary of the binding peptides according to the HLA supertype
+sumHLAb<-summary(HLA_binders[,13:24])
+#change column names
+colnames(sumHLAb)<-HLAsupertypes
+#show in table 5
+kbl(sumHLAb, booktabs = TRUE, 
+             caption = "Table 5. Number of binders according to HLA molecules") %>% 
+  kable_styling()
+```
+
+```{r sumHLAstrong, include=TRUE, results='asis'}
+#obtain summary of the binding peptides according to the HLA supertype
+sumHLAstrong<-summary(HLA_strong[,13:24])
+#change column name
+colnames(sumHLAstrong)<-HLAsupertypes
+#show in table 6
+kbl(sumHLAstrong, booktabs = TRUE, 
+             caption = "Table 6. Number of strong binders according to HLA molecules") %>% 
+  kable_styling()
+```
+
+## ANALYSIS OF NEOANTIGEN BURDEN ON PRIMARY TUMOR AND METASTASIS LOCATIONS
+
+To analyze the results obtained from the software of neoantigenic prediction, the number of mutations and neoantigens are added to the dataframe containing the clinical information of the patients:
+
+We first add the number of potential neoantigens of each patient:
+```{r results_nrneo}
+#we obtain the number of potential neoantigens per patient
+nr_neo_pt <- as.data.frame(table(binding_pep$PtNr))
+#we change the name of the variables
+names(nr_neo_pt) <- c("PtNr", "NrNeo")
+#check that the dataframe has been created properly
+nr_neo_pt 
+#we add the number of potential neoantigens per patient to our database
+discov_pts <- merge(discov_pts, nr_neo_pt, by = 'PtNr', all.x=TRUE)
+#replace those containing NA by 0, because they do not have any mutation
+discov_pts$NrNeo[is.na(discov_pts$NrNeo)] <- 0
+#check
+discov_pts$NrNeo  
+```
+
+We add the number of mutations of each patient:
+```{r results_nrmut}
+#we obtain the number of mutations per patient
+nr_muts_pt <- as.data.frame(table(mutSNV_discov_pts$PtNr))
+#we change the name of the variables
+names(nr_muts_pt) <- c("PtNr", "NrMut")
+#we add the number of mutations per patient to our database
+discov_pts <- merge(discov_pts, nr_muts_pt, by = 'PtNr', all.x=TRUE)
+#replace those containing NA by 0, because they do not have any mutation
+discov_pts$NrMut[is.na(discov_pts$NrMut)] <- 0
+#check
+#discov_pts$NrMut 
+
+#we have to take into account that NrMut includes only SNV missense mutations, thus the number of mutations used to predict neoantigens should be equal or lower than the real mutation count found in the data:
+table(discov_pts$MUTATION_COUNT >= discov_pts$NrMut)
+
+#we now check if patients have more mutations or more neoantigens
+table(discov_pts$NrNeo > discov_pts$NrMut)
+```
+
+
+### Study of the differences on neoantigen burden on different metastatic locations
+
+We first check if the number of neoantigens follows a normal distribution, to apply parametric or non-parametric statistical tests:
+```{r res_distr, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. NS. Graphs showing distribution of number of neoantigens."}
+#note: these graphs are not shown in the final report
+with(discov_pts,qqnorm(NrNeo))
+with(discov_pts,qqline(NrNeo))
+with(discov_pts,hist(NrNeo))
+with(discov_pts,ks.test(NrNeo,"pnorm"))
+```
+
+Data do not follow a normal distribution, thus we will use non-parametric tests.
+
+Now, we are going to see whether there is a correlation between number of neoantigens, number of mutations and tumor mutational burden:
+
+```{r scatterplots, fig.show="hold",out.width="50%", fig.height = 10, fig.width = 6, fig.align="default", fig.cap="Figure. 6. Scatterplots of number of neoantigens and number of mutations."}
+options(repr.plot.width =9, repr.plot.height =9)
+scatter1<-ggplot(discov_pts, aes(x=NrMut, y=NrNeo))+ geom_point(color="#69b3a2") + stat_cor(method = "spearman",) + theme_classic() + labs(tag="A)",x="Number of mutations (missense SNVs)", y="Number of neoantigens")
+
+options(repr.plot.width =9, repr.plot.height =9)
+scatter2<-ggplot(discov_pts, aes(x=MUTATION_COUNT, y=NrNeo))+ geom_point(color="#69b3a2") + stat_cor(method = "spearman",) + theme_classic() + labs (tag="B)",x="Number of mutations (all)",y="Number of neoantigens")
+
+options(repr.plot.width =9, repr.plot.height =9)
+scatter3<-ggplot(discov_pts, aes(x=TMB_NONSYNONYMOUS, y=NrNeo))+ geom_point(color="#69b3a2") + stat_cor(method = "spearman",) + theme_classic() + labs (tag= "C)", x="TMB", y="Number of neoantigens")
+
+scatters <- grid.arrange(scatter1,scatter2,scatter3)
+ggsave(scatters, file = "Results/scatterplots.png")
+```
+
+We now check whether there is any difference on the neoantigen burden depending on the origin of the sample tested (primary or metastasis).
+
+```{r res_mann_sampletype}
+wilcox.test(discov_pts$NrNeo ~ discov_pts$SAMPLE_TYPE)
+#with(discov_pts, boxplot(NrNeo~SAMPLE_TYPE, main ="Boxplot Number of Neoantigens and sample type", ylab="Number of neoantigens", xlab = "Sample type"))
+```
+
+As we can see, there is no difference between the number of neoantigens in the metastatic samples and in the samples from the primary tumour.
+
+We now check if there is any difference on the number of neoantigens in each metastatic site:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 7. Number of neoantigens according to metastatic site."}
+plotData=na.omit(discov_pts[,c("NrNeo","METASTATIC_SITE")])
+ggboxplot(plotData, x = "METASTATIC_SITE", y = "NrNeo",  color="METASTATIC_SITE", ylab = "Number of neoantigens", xlab = "Metastatic site") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=180, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krus}
+with(discov_pts,kruskal.test(NrNeo~METASTATIC_SITE))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(discov_pts,dunn.test(NrNeo,METASTATIC_SITE, kw=TRUE))
+```
+
+Since there is a statistically significant difference on the number of neoantigens depending on the metastatic location, we are going to assess if it is maintained with TMB:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 8. TMB according to metastatic site."}
+plotData=na.omit(discov_pts[,c("TMB_NONSYNONYMOUS","METASTATIC_SITE")])
+ggboxplot(plotData, x = "METASTATIC_SITE", y = "TMB_NONSYNONYMOUS",  color="METASTATIC_SITE", ylab = "TMB", xlab = "Metastatic site") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=130, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusTMB}
+with(discov_pts,kruskal.test(TMB_NONSYNONYMOUS~METASTATIC_SITE))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(discov_pts,dunn.test(TMB_NONSYNONYMOUS,METASTATIC_SITE, kw=TRUE))
+```
+
+Since the differences observed in number of neoantigens correlates with the differences observed in the number of mutations (TMB), from now on all the tests will be focused on number of neoantigens.
+
+We next assessed whether there was a difference on the number of binders:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 9. Proportion of binding peptides according to metastatic site."}
+#number of binders by metastatic location
+plotData=na.omit(neo_discov_pts[,c("CANCER_TYPE", "NB","Binder", "METASTATIC_SITE", "MET_COUNT","MUTATION_COUNT")])
+ggplot(plotData, aes(fill=Binder, x = METASTATIC_SITE)) + geom_bar(position="fill") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + theme_classic() + labs(title="Number of neoantigens according to metastatic site", x="Metastatic site", y="Percentage") + theme(plot.title = element_text(hjust = 0.5, size=12))
+```
+
+Then we assessed wether there was any difference on the number of neoantigens, depending on the diagnosis of metastasis in each of the locations, independently of the sample analysed in each patient.
+
+```{r manndiagnosmetas, results="asis"}
+t1<-tableby(DMETS_DX_BONE ~NrNeo, data=discov_pts, numeric.test="kwt",numeric.stats=c("median","q1q3"))
+t2<-tableby(DMETS_DX_CNS_BRAIN ~NrNeo, data=discov_pts, numeric.test="kwt",numeric.stats=c("median","q1q3"))
+t3<-tableby(DMETS_DX_LIVER ~NrNeo, data=discov_pts, numeric.test="kwt",numeric.stats=c("median","q1q3"))
+t4<-tableby(DMETS_DX_LUNG ~NrNeo, data=discov_pts, numeric.test="kwt",numeric.stats=c("median","q1q3"))
+
+tabs<-merge(t1,t2,all=TRUE)
+tabs<-merge(tabs,t3,all=TRUE)
+tabs<-merge(tabs,t4,all=TRUE)
+#create table 7
+summary(tabs,pfootnote=TRUE, title = c("Bone metastasis diagnosed", "Brain metastasis diagnosed", "Liver metastasis diagnosed", "Lung metastasis diagnosed"))
+```
+
+We now test the hypothesis that lung metastases might be more immunogenic and contain a higher number of neoantigens, independently of the tumour type. For this reason, we 
+first check whether there is any difference on the number of neoantigens of metastasis depending on the sample type. Since lung cancer might influence this result, we exclude lung cancer patients:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 10. Number of neoantigens according to sample type and diagnosis of lung metastasis (excluding lung cancer)."}
+#to avoid lung cancer influence
+#this graph is represented excluding patients with lung cancer:
+discov_pts_nolung <- subset(discov_pts, CANCER_TYPE=="Breast Cancer" | CANCER_TYPE=="Colorectal Cancer" | CANCER_TYPE=="Renal Cell Carcinoma" | CANCER_TYPE=="Prostate Cancer" | CANCER_TYPE=="Melanoma")
+plotData=na.omit(discov_pts_nolung[,c("DMETS_DX_LUNG","NrNeo","SAMPLE_TYPE")])
+ggboxplot(plotData, x = "DMETS_DX_LUNG", y = "NrNeo",
+          facet.by = "SAMPLE_TYPE", color="DMETS_DX_LUNG", ylab = "Number of neoantigens", xlab = "Lung metastasis diagnosed")+ stat_compare_means(paired=FALSE, label = "p.signif", label.x=1.5, label.y=180, hide.ns=FALSE) + guides(color = "none")
+```
+As we can see, excluding patients with lung cancer, metastatic samples of patients with lung metastases present a higher number of neoantigens.Now, we check whether there is a difference on number of neoantigens on lung metastases, depending on the tumour type:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 11. Number of neoantigens according to cancer type and diagnosis of lung metastasis."}
+plotData=na.omit(discov_pts[,c("NrNeo","CANCER_TYPE", "DMETS_DX_LUNG","DMETS_DX_BONE", "DMETS_DX_CNS_BRAIN", "DMETS_DX_LIVER")])
+ggboxplot(plotData, x = "DMETS_DX_LUNG", y = "NrNeo",
+          facet.by = "CANCER_TYPE", color="DMETS_DX_LUNG", ylab = "Number of neoantigens", xlab = "Lung metastasis diagnosed")+ stat_compare_means(paired=FALSE, label = "p.signif", label.x=1.5, label.y=180, hide.ns=FALSE) + guides(color = "none")
+```
+
+There is no difference on the number of neoantigens of patients with diagnosed lung metastases in any of the analyzed types of cancer.
+
+We now check if there is any difference on the number of neoantigens or TMB depending on the tumour types:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 12. Number of neoantigens according to cancer type."}
+plotData=na.omit(discov_pts[,c("NrNeo","CANCER_TYPE")])
+ggboxplot(plotData, x = "CANCER_TYPE", y = "NrNeo",  color="CANCER_TYPE", ylab = "Number of neoantigens", xlab = "Type of cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=180, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krus_cancert}
+with(discov_pts,kruskal.test(NrNeo~CANCER_TYPE))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(discov_pts,dunn.test(NrNeo,CANCER_TYPE, kw=TRUE))
+```
+As we can see, there is a difference on the number of neoantigens depending on the type of cancer, which might be explained by the TMB: 
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 13. TMB according to cancer type."}
+plotData=na.omit(discov_pts[,c("TMB_NONSYNONYMOUS","CANCER_TYPE")])
+ggboxplot(plotData, x = "CANCER_TYPE", y = "TMB_NONSYNONYMOUS",  color="CANCER_TYPE", ylab = "TMB", xlab = "Type of cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=130, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krus_priTMB}
+with(discov_pts,kruskal.test(TMB_NONSYNONYMOUS~CANCER_TYPE))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(discov_pts,dunn.test(TMB_NONSYNONYMOUS,CANCER_TYPE, kw=TRUE))
+```
+
+We next assessed whether this difference was also found in the number of binders:
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 14. Number of binders according to cancer type."}
+#number of binders by cancer type
+plotData=na.omit(neo_discov_pts[,c("CANCER_TYPE", "NB","Binder", "METASTATIC_SITE")])
+ggplot(plotData, aes(fill=Binder, x = CANCER_TYPE)) + geom_bar(position="fill") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + theme_classic() + labs(title="Number of neoantigens according to cancer type", x="Cancer type",  y="Percentage") + theme(plot.title = element_text(hjust = 0.5)) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+```
+
+As happened with the different metastatic locations, the differences observed in number of neoantigens between tumor types correlates with the differences observed in the number of mutations (TMB), thus from now on all the tests will be focused on number of neoantigens.
+
+As we can see in figures 10 and 11, the number of neoantigens seems to be dependent on the type of cancer. For this reason, we assessed the  influence on the type of cancer on the neoantigen burden of metastases.
+
+## ASSESSMENT OF THE INFLUENCE OF PRIMARY TUMOUR TYPES ON NEOANTIGENIC BURDEN OF METASTASES
+
+We  next represented number of neoantigens depending on both, the type of cancer and the metastatic locations:
+
+```{r, fig.show="hold",out.width="80%", fig.align="default", fig.cap="Figure. 15. Number of neoantigens according to cancer type and metastatic locations."}
+plotData1=na.omit(discov_pts[,c("NrNeo", "METASTATIC_SITE","CANCER_TYPE")])
+g1<-ggplot(plotData1, aes(fill=CANCER_TYPE, y=NrNeo, x=METASTATIC_SITE))+ geom_bar(position="dodge",stat="identity") + scale_fill_manual(values=c("#E69F00", "#56B4E9", "#009E73", "#0072B2", "#D55E00", "#7570B3")) + font("xlab", face="bold", size=9)+ font("ylab", face="bold",size=9)+ font("x.text", size = 9) + font("y.text", size = 9) + theme_classic() + labs(title="Number of neoantigens according to metastatic site and cancer type", x="Metastatic site", y="Number of Neoantigens", fill="Cancer type", tag="A)") + theme(plot.title = element_text(hjust = 0.5,size=12)) + theme(legend.key.size = unit(0.2, 'cm'), legend.title = element_text(size=9),    legend.text = element_text(size=8)) 
+
+#remove melanoma for better visualization
+discov_pts_nomelanoma <- subset(discov_pts, CANCER_TYPE=="Breast Cancer" | CANCER_TYPE=="Colorectal Cancer" | CANCER_TYPE=="Renal Cell Carcinoma" | CANCER_TYPE=="Prostate Cancer" | CANCER_TYPE=="Non-Small Cell Lung Cancer")
+plotData2=na.omit(discov_pts_nomelanoma[,c("NrNeo", "METASTATIC_SITE","CANCER_TYPE")])
+g2<-ggplot(plotData2, aes(fill=CANCER_TYPE, y=NrNeo, x=METASTATIC_SITE))+ geom_bar(position="dodge",stat="identity") + scale_fill_manual(values=c("#E69F00", "#56B4E9", "#0072B2", "#D55E00", "#7570B3")) + font("xlab", face="bold",size=9)+ font("ylab", face="bold",size=9)+ font("x.text", size = 9) + font("y.text", size = 9) + theme_classic() + labs(title="(excluding melanoma)", x="Metastatic site", y="Number of Neoantigens", tag="B)") + theme(plot.title = element_text(hjust = 0.5,size=10))+ theme(legend.position="none") 
+
+#remove melanoma for better visualization
+discov_pts_nomelanomanolung <- subset(discov_pts, CANCER_TYPE=="Breast Cancer" | CANCER_TYPE=="Colorectal Cancer" | CANCER_TYPE=="Renal Cell Carcinoma" | CANCER_TYPE=="Prostate Cancer")
+plotData3=na.omit(discov_pts_nomelanomanolung[,c("NrNeo", "METASTATIC_SITE","CANCER_TYPE")])
+g3<-ggplot(plotData3, aes(fill=CANCER_TYPE, y=NrNeo, x=METASTATIC_SITE))+ geom_bar(position="dodge",stat="identity") + scale_fill_manual(values=c("#E69F00", "#56B4E9", "#D55E00", "#7570B3")) + font("xlab", face="bold",size=9)+ font("ylab", face="bold",size=9)+ font("x.text", size = 9) + font("y.text", size = 9) + theme_classic() + labs(title="(excluding lung and melanoma)", x="Metastatic site", y="Number of Neoantigens", tag="C)") + theme(plot.title = element_text(hjust = 0.5,size=10)) + theme(legend.position="none")
+
+graphdef<-grid.arrange(g1,g2,g3,layout_matrix=rbind(c(1,1),c(2,3)))
+ggsave(graphdef, file = "Results/graphdef.png")
+```
+
+As it can be seen, patients with metastases diagnosed in the CNS or brain present a higher number of neoantigens. However, it might be due to the fact that melanoma and lung cancer metastatize more frequently to brain than breast, prostate, colon or renal cancer.
+
+Given this variability of number of neoantigens depending on the type of cancer, we are now going to address our hypothesis individually in each tumour type:
+
+```{r subsettumortypes}
+#since we are going to analyze survival on each subgroup, we first recode variable status and convert it to logical, so it is already done for each type of cancer
+discov_pts$Exitus<-discov_pts$OS_STATUS
+levels(discov_pts$Exitus)<-c(FALSE,TRUE)
+discov_pts$Exitus<-as.logical(discov_pts$Exitus)
+#add variable called sample site, where primary and mestastatic sites will be the levels
+discov_pts$sample_site<-discov_pts$METASTATIC_SITE
+#discov_pts$sample_site = factor(discov_pts$sample_site, levels=c(levels(discov_pts$sample_site), "Primary"))
+#discov_pts$sample_site[is.na(discov_pts$sample_site)] = "Primary"
+discov_pts$sample_site<-fct_explicit_na(discov_pts$sample_site, na_level = "Primary")
+#check
+summary(discov_pts$sample_site)
+#select the primary tumours of interest
+breast <- subset(discov_pts, CANCER_TYPE=="Breast Cancer")
+colon <- subset(discov_pts, CANCER_TYPE=="Colorectal Cancer")
+renal <- subset(discov_pts, CANCER_TYPE=="Renal Cell Carcinoma")
+lung <- subset(discov_pts, CANCER_TYPE=="Non-Small Cell Lung Cancer")
+prostate <- subset(discov_pts, CANCER_TYPE=="Prostate Cancer")
+melanoma <- subset(discov_pts, CANCER_TYPE=="Melanoma")
+```
+
+#### BREAST 
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 16. Number of neoantigens according to metastatic locations in breast cancer patients."}
+plotData=na.omit(breast[,c("NrNeo","sample_site")])
+ggboxplot(plotData, x = "sample_site", y = "NrNeo",  color="sample_site", ylab = "Number of neoantigens", xlab = "Metastatic site", main="Number of neoantigens according to metastatic site \n in breast cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=15, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusB}
+with(breast,kruskal.test(NrNeo~sample_site))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(breast,dunn.test(NrNeo,sample_site, kw=TRUE))
+```
+
+```{r res_survNrNeoB, results="asis"}
+#dichotomize number of neoantigens
+breast$NrNeo_d <- dicho(breast$NrNeo, dich.by = "median")
+
+#create survival object
+breast$SurvObj<-with(breast, Surv(OS_MONTHS, Exitus))
+#Cox
+res.cox <- coxph(SurvObj ~ NrNeo_d, data = breast)
+res.cox
+
+#kaplan-meier
+sCP<-survfit(SurvObj ~ NrNeo_d, data = breast)
+ggsurvplot(sCP, pval=TRUE, legend.labs=c("Low", "High"), legend.title="Nr Neoantigens", title="KM curve for Number of Neoantigens \n in Breast Cancer", xlab="OS (months)",palette = c("#004C99", "#CC99FF"), pval.coord = c(1, 0.03),legend=c(0.9,0.9))
+```
+
+```{r tablebyB, results="asis"}
+#table 8
+summary(tableby(NrNeo_d ~ Surv(OS_MONTHS, Exitus),data=breast))
+```
+
+#### COLON 
+
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 17. Number of neoantigens according to metastatic locations in colorectal cancer patients."}
+plotData=na.omit(colon[,c("NrNeo","sample_site")])
+ggboxplot(plotData, x = "sample_site", y = "NrNeo",  color="sample_site", ylab = "Number of neoantigens", xlab = "Metastatic site", main="Number of neoantigens according to metastatic site \n in colorectal cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=15, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusC}
+with(colon,kruskal.test(NrNeo~sample_site))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(colon,dunn.test(NrNeo,sample_site, kw=TRUE))
+```
+
+```{r res_survNrNeoC, results="asis"}
+#dichotomize number of neoantigens
+colon$NrNeo_d <- dicho(colon$NrNeo, dich.by = "median")
+
+#create survival object
+colon$SurvObj<-with(colon, Surv(OS_MONTHS, Exitus))
+#Cox
+res.cox <- coxph(SurvObj ~ NrNeo_d, data = colon)
+res.cox
+
+#kaplan-meier
+sCP<-survfit(SurvObj ~ NrNeo_d, data = colon)
+ggsurvplot(sCP, pval=TRUE, legend.labs=c("Low", "High"), legend.title="Nr Neoantigens", title="KM curve for Number of Neoantigens \n in Colorectal Cancer", xlab="OS (months)",palette = c("#004C99", "#CC99FF"), pval.coord = c(1, 0.03),legend=c(0.9,0.9))
+```
+
+
+```{r tablebyC, results="asis"}
+#table 9
+summary(tableby(NrNeo_d ~ Surv(OS_MONTHS, Exitus),data=colon))
+```
+
+#### MELANOMA
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", , fig.cap="Figure. 18. Number of neoantigens according to metastatic locations in melanoma patients."}
+plotData=na.omit(melanoma[,c("NrNeo","sample_site")])
+ggboxplot(plotData, x = "sample_site", y = "NrNeo",  color="sample_site", ylab = "Number of neoantigens", xlab = "Metastatic site", main="Number of neoantigens according to metastatic site \n in melanoma") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=3, label.y=200, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusM}
+with(melanoma,kruskal.test(NrNeo~sample_site))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(melanoma,dunn.test(NrNeo,sample_site, kw=TRUE))
+```
+
+```{r res_survNrNeoM, results="asis"}
+#dichotomize number of neoantigens
+melanoma$NrNeo_d <- dicho(melanoma$NrNeo, dich.by = "median")
+
+#create survival object
+melanoma$SurvObj<-with(melanoma, Surv(OS_MONTHS, Exitus))
+#Cox
+res.cox <- coxph(SurvObj ~ NrNeo_d, data = melanoma)
+res.cox
+
+
+#kaplan-meier
+sCP<-survfit(SurvObj ~ NrNeo_d, data = melanoma)
+ggsurvplot(sCP, pval=TRUE, legend.labs=c("Low", "High"), legend.title="Nr Neoantigens", title="KM curve for Number of Neoantigens \n in Melanoma", xlab="OS (months)",palette = c("#004C99", "#CC99FF"), pval.coord = c(1, 0.03),legend=c(0.9,0.9))
+```
+
+```{r tablebyM, results="asis"}
+#table 10
+summary(tableby(NrNeo_d ~ Surv(OS_MONTHS, Exitus),data=melanoma))
+```
+
+#### LUNG
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 19. Number of neoantigens according to metastatic locations in lung cancer patients."}
+plotData=na.omit(lung[,c("NrNeo","sample_site")])
+ggboxplot(plotData, x = "sample_site", y = "NrNeo",  color="sample_site", ylab = "Number of neoantigens", xlab = "Metastatic site", main="Number of neoantigens according to metastatic site \n in lung cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=0.5, label.y=30, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusL}
+with(lung,kruskal.test(NrNeo~sample_site))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(lung,dunn.test(NrNeo,sample_site, kw=TRUE))
+```
+
+```{r res_survNrNeoL, results="asis"}
+#dichotomize number of neoantigens
+lung$NrNeo_d <- dicho(lung$NrNeo, dich.by = "median")
+
+#create survival object
+lung$SurvObj<-with(lung, Surv(OS_MONTHS, Exitus))
+#Cox
+res.cox <- coxph(SurvObj ~ NrNeo_d, data = lung)
+res.cox
+
+#kaplan-meier
+sCP<-survfit(SurvObj ~ NrNeo_d, data = lung)
+ggsurvplot(sCP, pval=TRUE, legend.labs=c("Low", "High"), legend.title="Nr Neoantigens", title="KM curve for Number of Neoantigens \n in Lung Cancer", xlab="OS (months)",palette = c("#004C99", "#CC99FF"), pval.coord = c(1, 0.03),legend=c(0.9,0.9))
+```
+
+
+```{r tablebyL, results="asis"}
+#table 11
+summary(tableby(NrNeo_d ~ Surv(OS_MONTHS, Exitus),data=lung))
+```
+
+
+#### PROSTATE
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 20. Number of neoantigens according to metastatic locations in prostate cancer patients."}
+plotData=na.omit(prostate[,c("NrNeo","sample_site")])
+ggboxplot(plotData, x = "sample_site", y = "NrNeo",  color="sample_site", ylab = "Number of neoantigens", xlab = "Metastatic site", main="Number of neoantigens according to metastatic site \n in prostate cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=15, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusP}
+with(prostate,kruskal.test(NrNeo~sample_site))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(prostate,dunn.test(NrNeo,sample_site, kw=TRUE))
+```
+
+```{r res_survNrNeoP, results="asis"}
+#dichotomize number of neoantigens
+prostate$NrNeo_d <- dicho(prostate$NrNeo, dich.by = "median")
+
+#create survival object
+prostate$SurvObj<-with(prostate, Surv(OS_MONTHS, Exitus))
+#Cox
+res.cox <- coxph(SurvObj ~ NrNeo_d, data = prostate)
+res.cox
+
+#kaplan-meier
+sCP<-survfit(SurvObj ~ NrNeo_d, data = prostate)
+ggsurvplot(sCP, pval=TRUE, legend.labs=c("Low", "High"), legend.title="Nr Neoantigens", title="KM curve for Number of Neoantigens \n in Prostate Cancer", xlab="OS (months)",palette = c("#004C99", "#CC99FF"), pval.coord = c(1, 0.03),legend=c(0.9,0.9))
+```
+
+```{r tablebyP, results="asis"}
+#table 12
+summary(tableby(NrNeo_d ~ Surv(OS_MONTHS, Exitus),data=prostate))
+```
+
+#### RENAL
+
+```{r, fig.show="hold",out.width="50%", fig.align="default", fig.cap="Figure. 21. Number of neoantigens according to metastatic locations in renal cancer patients."}
+plotData=na.omit(renal[,c("NrNeo","sample_site")])
+ggboxplot(plotData, x = "sample_site", y = "NrNeo",  color="sample_site", ylab = "Number of neoantigens", xlab = "Metastatic site", main="Number of neoantigens according to metastatic site \n in renal cancer") + font("xlab", face="bold")+ font("ylab", face="bold")+ font("x.text", size = 10) + scale_x_discrete(labels = function(x) str_wrap(x, width = 10))  +  stat_compare_means(paired=FALSE, label = "p.format", label.x=1, label.y=30, hide.ns=FALSE) + guides(color = "none")
+```
+
+```{r res_krusR}
+with(renal,kruskal.test(NrNeo~sample_site))
+#since there is a statistically significant difference, dunn test is used to determine between which groups there is that difference
+with(renal,dunn.test(NrNeo,sample_site, kw=TRUE))
+```
+
+
+```{r res_survNrNeoR, results="asis"}
+#dichotomize number of neoantigens
+renal$NrNeo_d <- dicho(renal$NrNeo, dich.by = "median")
+
+#create survival object
+renal$SurvObj<-with(renal, Surv(OS_MONTHS, Exitus))
+
+#Cox
+res.cox <- coxph(SurvObj ~ NrNeo_d, data = renal)
+res.cox
+
+#kaplan-meier
+sCP<-survfit(SurvObj ~ NrNeo_d, data = renal)
+ggsurvplot(sCP, pval=TRUE, legend.labs=c("Low", "High"), legend.title="Nr Neoantigens", title="KM curve for Number of Neoantigens \n in Renal Cancer", xlab="OS (months)",palette = c("#004C99", "#CC99FF"), pval.coord = c(1, 0.03),legend=c(0.9,0.9))
+```
+
+
+```{r tablebyR, results="asis"}
+#table 13
+summary(tableby(NrNeo_d ~ Surv(OS_MONTHS, Exitus),data=renal))
+```
+
+
+# Appendix 1
+
+```{r listOfFiles, echo=FALSE}
+listOfFiles <- dir("./results/") 
+knitr::kable(
+  listOfFiles, booktabs = TRUE,
+  caption = 'List of generated files',
+  col.names="List_of_Files"
+)
+```
+
+
+
+# Appendix 2
+
+```{r get-labels1}
+labs = knitr::all_labels()
+labs = setdiff(labs, c("setup", "get-labels"))
+```
+
+
+```{r all-code, ref.label=labs, eval=FALSE, echo=TRUE}
+```
